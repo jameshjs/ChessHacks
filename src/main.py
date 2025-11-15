@@ -3,6 +3,12 @@ from chess import Move
 import random
 import time
 
+import numpy as np
+from datasets import load_dataset
+import tensorflow as tf
+import keras
+from keras import layers
+
 # Write code here that runs once
 # Can do things like load models from huggingface, make connections to subprocesses, etcwenis
 
