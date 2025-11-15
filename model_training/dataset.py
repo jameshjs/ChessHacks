@@ -1,10 +1,16 @@
 """
-Dataset loader for Magnus Carlsen Lichess Games Dataset.
+Dataset loader for Leela Chess Zero Self-Play Games Dataset from Kaggle.
 """
 
 import chess
+import chess.pgn
 import numpy as np
-from datasets import load_dataset
+import kagglehub
+import pandas as pd
+import os
+import re
+import io
+from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from typing import Optional, Tuple
 import random
@@ -14,54 +20,246 @@ from position_encoder import PositionEncoder
 class ChessPositionDataset(Dataset):
     """
     Dataset for chess position evaluation.
-    Loads positions from the Magnus Carlsen Lichess Games Dataset.
+    Loads positions from the Leela Chess Zero Self-Play Games Dataset on Kaggle.
     """
     
     def __init__(
         self,
-        dataset_name: str = "luca-g97/Magnus-Carlsen-Lichess-Games-Dataset-FEN",
-        split: str = "train",
+        dataset_path: Optional[str] = None,
+        kaggle_dataset: str = "anthonytherrien/leela-chess-zero-self-play-chess-games-dataset-3",
         max_samples: Optional[int] = None,
         use_game_outcome: bool = True,
         evaluation_range: Tuple[float, float] = (-1000, 1000),
     ):
         """
         Args:
-            dataset_name: Hugging Face dataset name
-            split: Dataset split ('train', 'validation', 'test')
+            dataset_path: Path to already downloaded dataset (if None, will download)
+            kaggle_dataset: Kaggle dataset identifier
             max_samples: Maximum number of samples to load (None for all)
             use_game_outcome: If True, use game outcome as label; else use simple evaluation
             evaluation_range: Range for evaluation labels (min, max) in centipawns
         """
-        print(f"Loading dataset {dataset_name}...")
-        self.dataset = load_dataset(dataset_name, split=split, streaming=False)
+        # Download dataset from Kaggle if path not provided
+        if dataset_path is None:
+            print(f"Downloading dataset from Kaggle: {kaggle_dataset}...")
+            dataset_path = kagglehub.dataset_download(kaggle_dataset)
+            print(f"Dataset downloaded to: {dataset_path}")
         
-        # Convert to list and limit samples if needed
-        self.data = list(self.dataset)
-        if max_samples is not None:
-            self.data = self.data[:max_samples]
+        self.dataset_path = Path(dataset_path)
         
-        print(f"Loaded {len(self.data)} samples")
+        # Load data from Kaggle dataset
+        print(f"Loading dataset from {self.dataset_path}...")
+        self.data = self._load_kaggle_dataset()
+        
+        # Note: max_samples is handled during preprocessing, not here
+        if isinstance(self.data, list) and len(self.data) > 0:
+            if isinstance(self.data[0], (str, Path)):
+                print(f"Found {len(self.data)} PGN file(s) to process")
+            else:
+                print(f"Loaded {len(self.data)} samples")
         
         self.use_game_outcome = use_game_outcome
         self.evaluation_range = evaluation_range
+        self.max_samples = max_samples  # Store for use in preprocessing
         
         # Preprocess data
         self.positions = []
         self.labels = []
         self._preprocess_data()
     
+    def _load_kaggle_dataset(self):
+        """
+        Load dataset from Kaggle download path.
+        Handles PGN files (primary) and other formats (CSV, parquet, etc.) as fallback.
+        """
+        # First, try to find PGN files
+        pgn_files = list(self.dataset_path.rglob('*.pgn'))
+        
+        if pgn_files:
+            print(f"Found {len(pgn_files)} PGN file(s)")
+            # Return list of PGN file paths to process
+            return pgn_files
+        
+        # Fallback to other formats
+        data_files = []
+        for ext in ['*.csv', '*.parquet', '*.json', '*.jsonl']:
+            data_files.extend(list(self.dataset_path.rglob(ext)))
+        
+        if not data_files:
+            # Try looking for common filenames
+            common_names = ['train.csv', 'data.csv', 'games.csv', 'positions.csv', 
+                          'train.parquet', 'data.parquet', 'games.parquet']
+            for name in common_names:
+                file_path = self.dataset_path / name
+                if file_path.exists():
+                    data_files = [file_path]
+                    break
+        
+        if not data_files:
+            raise FileNotFoundError(
+                f"No data files found in {self.dataset_path}. "
+                f"Expected PGN, CSV, parquet, or JSON files."
+            )
+        
+        # Load the first data file found
+        data_file = data_files[0]
+        print(f"Loading data from: {data_file}")
+        
+        if data_file.suffix == '.csv':
+            df = pd.read_csv(data_file)
+            return df.to_dict('records')
+        elif data_file.suffix == '.parquet':
+            df = pd.read_parquet(data_file)
+            return df.to_dict('records')
+        elif data_file.suffix in ['.json', '.jsonl']:
+            df = pd.read_json(data_file, lines=(data_file.suffix == '.jsonl'))
+            return df.to_dict('records')
+        else:
+            raise ValueError(f"Unsupported file format: {data_file.suffix}")
+    
     def _preprocess_data(self):
         """Preprocess dataset to extract positions and labels."""
         print("Preprocessing data...")
         
+        # Check if data is PGN files or dict records
+        if isinstance(self.data, list) and len(self.data) > 0:
+            if isinstance(self.data[0], (str, Path)):
+                # It's a list of PGN file paths
+                self._process_pgn_files()
+                return
+            elif isinstance(self.data[0], dict):
+                # It's a list of dict records (CSV/parquet format)
+                self._process_dict_records()
+                return
+        
+        print(f"Preprocessed {len(self.positions)} valid positions")
+    
+    def _process_pgn_files(self):
+        """Process PGN files to extract positions and evaluations."""
+        position_count = 0
+        
+        for file_idx, pgn_file in enumerate(self.data):
+            if file_idx % 10 == 0:
+                print(f"Processing PGN file {file_idx + 1}/{len(self.data)}")
+            
+            try:
+                with open(pgn_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    while True:
+                        game = chess.pgn.read_game(f)
+                        if game is None:
+                            break
+                        
+                        # Process this game
+                        positions_from_game = self._extract_positions_from_game(game)
+                        position_count += len(positions_from_game)
+                        
+                        # Add to dataset
+                        for fen, eval_score in positions_from_game:
+                            self.positions.append(fen)
+                            self.labels.append(eval_score)
+                        
+                        # Limit total samples if specified
+                        if self.max_samples and len(self.positions) >= self.max_samples:
+                            self.positions = self.positions[:self.max_samples]
+                            self.labels = self.labels[:self.max_samples]
+                            print(f"Reached max_samples limit: {self.max_samples}")
+                            return
+                            
+            except Exception as e:
+                print(f"Error processing PGN file {pgn_file}: {e}")
+                continue
+        
+        print(f"Extracted {len(self.positions)} positions from PGN files")
+    
+    def _extract_positions_from_game(self, game):
+        """
+        Extract positions and evaluations from a PGN game.
+        
+        Returns:
+            List of (fen, evaluation) tuples
+        """
+        positions = []
+        board = game.board()
+        
+        # Process each move in the game
+        for node in game.mainline():
+            move = node.move
+            
+            # Get evaluation from move comment
+            eval_score = self._parse_evaluation_from_comment(node.comment)
+            
+            # Make the move to get the position after the move
+            board.push(move)
+            
+            # Skip terminal positions
+            if board.is_checkmate() or board.is_stalemate():
+                board.pop()
+                break
+            
+            # Get FEN of position after move
+            fen = board.fen()
+            
+            # Convert evaluation to centipawns and adjust for side to move
+            if eval_score is not None:
+                # Evaluation in comment is from perspective of side that just moved
+                # We standardize to white's perspective: positive = white advantage
+                # Convert from pawns to centipawns
+                eval_centipawns = eval_score * 100
+                
+                # If black just moved (white to move now), the eval was from black's perspective
+                # Flip to get white's perspective
+                if board.turn == chess.WHITE:  # White to move, so black just moved
+                    eval_centipawns = -eval_centipawns
+                # If black to move (white just moved), eval is already from white's perspective
+                
+                # Clip to range
+                eval_centipawns = np.clip(eval_centipawns, self.evaluation_range[0], self.evaluation_range[1])
+                positions.append((fen, float(eval_centipawns)))
+            elif not self.use_game_outcome:
+                # Use simple material evaluation if no evaluation available
+                eval_score = self._get_simple_evaluation(board)
+                positions.append((fen, eval_score))
+        
+        return positions
+    
+    def _parse_evaluation_from_comment(self, comment: Optional[str]) -> Optional[float]:
+        """
+        Parse evaluation from PGN move comment.
+        Format: { +0.29/5 0.14s } or { -0.19/4 0.15s }
+        
+        Returns:
+            Evaluation in pawns, or None if not found
+        """
+        if not comment:
+            return None
+        
+        # Match pattern like "+0.29" or "-0.19" at the start of comment
+        # Pattern: optional +/-, digits, decimal point, digits
+        match = re.search(r'([+-]?\d+\.?\d*)', comment)
+        if match:
+            try:
+                eval_score = float(match.group(1))
+                return eval_score
+            except ValueError:
+                return None
+        
+        return None
+    
+    def _process_dict_records(self):
+        """Process dict records (from CSV/parquet files)."""
         for idx, sample in enumerate(self.data):
             if idx % 10000 == 0:
                 print(f"Processing sample {idx}/{len(self.data)}")
             
             try:
-                fen = sample.get('FEN')
-                if not fen:
+                # Try different possible FEN column names
+                fen = None
+                for col_name in ['FEN', 'fen', 'position', 'Position', 'board', 'Board']:
+                    if col_name in sample:
+                        fen = sample[col_name]
+                        break
+                
+                if not fen or (isinstance(fen, float) and pd.isna(fen)):
                     continue
                 
                 # Create board from FEN
@@ -90,12 +288,11 @@ class ChessPositionDataset(Dataset):
             except Exception as e:
                 # Skip problematic samples
                 continue
-        
-        print(f"Preprocessed {len(self.positions)} valid positions")
     
     def _get_outcome_label(self, sample: dict, board: chess.Board) -> Optional[float]:
         """
         Get label from game outcome.
+        For Leela Chess Zero dataset, tries to extract evaluation or game result.
         
         Args:
             sample: Dataset sample
@@ -104,11 +301,26 @@ class ChessPositionDataset(Dataset):
         Returns:
             Evaluation label in centipawns, or None if invalid
         """
-        winner = sample.get('Winner')
-        loser = sample.get('Loser')
+        # Try to get evaluation directly (Leela datasets often have this)
+        eval_cols = ['evaluation', 'Evaluation', 'eval', 'Eval', 'score', 'Score', 'value', 'Value']
+        for col in eval_cols:
+            if col in sample and not pd.isna(sample[col]):
+                try:
+                    eval_score = float(sample[col])
+                    # Convert to centipawns if needed (Leela uses different scales)
+                    # Assuming it's already in a reasonable range, just clip it
+                    eval_score = np.clip(eval_score, self.evaluation_range[0], self.evaluation_range[1])
+                    return float(eval_score)
+                except (ValueError, TypeError):
+                    continue
+        
+        # Try to get game outcome
+        winner = sample.get('Winner') or sample.get('winner')
+        loser = sample.get('Loser') or sample.get('loser')
         
         if not winner or not loser:
-            return None
+            # If no outcome, use material-based evaluation
+            return self._get_simple_evaluation(board)
         
         # Determine if current position's side to move is the winner
         # This is a simplification - we don't know which player is which from the position

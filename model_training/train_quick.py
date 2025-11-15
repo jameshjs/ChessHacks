@@ -73,8 +73,7 @@ def train_quick(
     print("Loading dataset (small subset)...")
     try:
         train_dataset = ChessPositionDataset(
-            dataset_name="luca-g97/Magnus-Carlsen-Lichess-Games-Dataset-FEN",
-            split='train',
+            kaggle_dataset="anthonytherrien/leela-chess-zero-self-play-chess-games-dataset-3",
             max_samples=max_samples,
             use_game_outcome=False,  # Use simple evaluation for speed
         )
@@ -83,8 +82,7 @@ def train_quick(
         print("Trying alternative approach...")
         # Try with even smaller sample
         train_dataset = ChessPositionDataset(
-            dataset_name="luca-g97/Magnus-Carlsen-Lichess-Games-Dataset-FEN",
-            split='train',
+            kaggle_dataset="anthonytherrien/leela-chess-zero-self-play-chess-games-dataset-3",
             max_samples=min(max_samples, 500),
             use_game_outcome=False,
         )

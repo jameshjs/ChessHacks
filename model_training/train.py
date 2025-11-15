@@ -68,8 +68,8 @@ def validate(model, dataloader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser(description='Train chess position evaluation model')
-    parser.add_argument('--dataset', type=str, default='luca-g97/Magnus-Carlsen-Lichess-Games-Dataset-FEN',
-                        help='Hugging Face dataset name')
+    parser.add_argument('--dataset', type=str, default='anthonytherrien/leela-chess-zero-self-play-chess-games-dataset-3',
+                        help='Kaggle dataset identifier')
     parser.add_argument('--max-samples', type=int, default=None,
                         help='Maximum number of samples to use (None for all)')
     parser.add_argument('--batch-size', type=int, default=64,
@@ -86,10 +86,6 @@ def main():
                         help='Output directory for saved models')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device to use (auto, cpu, cuda)')
-    parser.add_argument('--train-split', type=str, default='train',
-                        help='Training split name')
-    parser.add_argument('--val-split', type=str, default='validation',
-                        help='Validation split name')
     parser.add_argument('--use-game-outcome', action='store_true',
                         help='Use game outcome as label (else use simple evaluation)')
     
@@ -107,43 +103,26 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Load datasets
-    print("Loading training dataset...")
+    # Load dataset
+    print("Loading dataset...")
     try:
-        train_dataset = ChessPositionDataset(
-            dataset_name=args.dataset,
-            split=args.train_split,
+        full_dataset = ChessPositionDataset(
+            kaggle_dataset=args.dataset,
             max_samples=args.max_samples,
             use_game_outcome=args.use_game_outcome,
         )
     except Exception as e:
-        print(f"Error loading training dataset: {e}")
-        print("Trying with 'train' split...")
-        train_dataset = ChessPositionDataset(
-            dataset_name=args.dataset,
-            split='train',
-            max_samples=args.max_samples,
-            use_game_outcome=args.use_game_outcome,
-        )
+        print(f"Error loading dataset: {e}")
+        raise
     
-    print("Loading validation dataset...")
-    try:
-        val_dataset = ChessPositionDataset(
-            dataset_name=args.dataset,
-            split=args.val_split,
-            max_samples=min(args.max_samples // 10 if args.max_samples else 10000, 10000),
-            use_game_outcome=args.use_game_outcome,
-        )
-    except Exception as e:
-        print(f"Warning: Could not load validation split '{args.val_split}': {e}")
-        print("Creating validation set from training data (10% split)...")
-        # Split training data for validation
-        train_size = int(0.9 * len(train_dataset))
-        val_size = len(train_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            train_dataset, [train_size, val_size]
-        )
-        print(f"Using {len(train_dataset)} samples for training, {len(val_dataset)} for validation")
+    # Split into train and validation
+    print("Splitting dataset into train and validation...")
+    train_size = int(0.9 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size]
+    )
+    print(f"Using {len(train_dataset)} samples for training, {len(val_dataset)} for validation")
     
     # Create data loaders
     train_loader = DataLoader(
