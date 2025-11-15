@@ -11,11 +11,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 from pathlib import Path
+import modal
 
 from model import create_model
 from dataset import ChessPositionDataset
 from position_encoder import PositionEncoder
 
+app=modal.App()
 
 def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
     """Train for one epoch."""
@@ -45,7 +47,6 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
     
     return total_loss / num_batches
 
-
 def validate(model, dataloader, criterion, device):
     """Validate the model."""
     model.eval()
@@ -65,31 +66,43 @@ def validate(model, dataloader, criterion, device):
     
     return total_loss / num_batches
 
-
-def main():
-    parser = argparse.ArgumentParser(description='Train chess position evaluation model')
-    parser.add_argument('--dataset', type=str, default='anthonytherrien/leela-chess-zero-self-play-chess-games-dataset-3',
-                        help='Kaggle dataset identifier')
-    parser.add_argument('--max-samples', type=int, default=None,
-                        help='Maximum number of samples to use (None for all)')
-    parser.add_argument('--batch-size', type=int, default=64,
-                        help='Batch size')
-    parser.add_argument('--epochs', type=int, default=10,
-                        help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=0.001,
-                        help='Learning rate')
-    parser.add_argument('--hidden-channels', type=int, default=128,
-                        help='Number of hidden channels')
-    parser.add_argument('--num-residual-blocks', type=int, default=4,
-                        help='Number of residual blocks')
-    parser.add_argument('--output-dir', type=str, default='../models',
-                        help='Output directory for saved models')
-    parser.add_argument('--device', type=str, default='auto',
-                        help='Device to use (auto, cpu, cuda)')
-    parser.add_argument('--use-game-outcome', action='store_true',
-                        help='Use game outcome as label (else use simple evaluation)')
+def train_main(
+    dataset: str = 'anthonytherrien/leela-chess-zero-self-play-chess-games-dataset-3',
+    max_samples: int = None,
+    batch_size: int = 64,
+    epochs: int = 10,
+    lr: float = 0.001,
+    hidden_channels: int = 128,
+    num_residual_blocks: int = 4,
+    output_dir: str = '../models',
+    device: str = 'auto',
+    use_game_outcome: bool = False
+):
+    """Main training function that can be called directly or via Modal."""
+    # Convert None string to None for max_samples
+    if max_samples == "None" or max_samples == "":
+        max_samples = None
+    elif isinstance(max_samples, str):
+        max_samples = int(max_samples)
     
-    args = parser.parse_args()
+    # Convert boolean string to bool
+    if isinstance(use_game_outcome, str):
+        use_game_outcome = use_game_outcome.lower() in ('true', '1', 'yes')
+    
+    # Create args-like object for compatibility
+    class Args:
+        pass
+    args = Args()
+    args.dataset = dataset
+    args.max_samples = max_samples
+    args.batch_size = batch_size
+    args.epochs = epochs
+    args.lr = lr
+    args.hidden_channels = hidden_channels
+    args.num_residual_blocks = num_residual_blocks
+    args.output_dir = output_dir
+    args.device = device
+    args.use_game_outcome = use_game_outcome
     
     # Determine device
     if args.device == 'auto':
@@ -158,7 +171,7 @@ def main():
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+        optimizer, mode='min', factor=0.5, patience=3
     )
     
     # Training loop
@@ -178,7 +191,11 @@ def main():
         print(f"Val Loss: {val_loss:.4f}")
         
         # Learning rate scheduling
+        old_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_loss)
+        new_lr = optimizer.param_groups[0]['lr']
+        if old_lr != new_lr:
+            print(f"Learning rate reduced from {old_lr:.6f} to {new_lr:.6f}")
         
         # Save best model
         if val_loss < best_val_loss:
@@ -228,6 +245,74 @@ def main():
     print(f"Best validation loss: {best_val_loss:.4f}")
 
 
+@app.local_entrypoint()
+def main(
+    dataset: str = 'anthonytherrien/leela-chess-zero-self-play-chess-games-dataset-3',
+    max_samples: int = None,
+    batch_size: int = 64,
+    epochs: int = 10,
+    lr: float = 0.001,
+    hidden_channels: int = 128,
+    num_residual_blocks: int = 4,
+    output_dir: str = '../models',
+    device: str = 'auto',
+    use_game_outcome: bool = False
+):
+    """Modal entrypoint - calls train_main with arguments."""
+    train_main(
+        dataset=dataset,
+        max_samples=max_samples,
+        batch_size=batch_size,
+        epochs=epochs,
+        lr=lr,
+        hidden_channels=hidden_channels,
+        num_residual_blocks=num_residual_blocks,
+        output_dir=output_dir,
+        device=device,
+        use_game_outcome=use_game_outcome
+    )
+
+
+def main_cli():
+    """Command-line interface using argparse."""
+    parser = argparse.ArgumentParser(description='Train chess position evaluation model')
+    parser.add_argument('--dataset', type=str, default='anthonytherrien/leela-chess-zero-self-play-chess-games-dataset-3',
+                        help='Kaggle dataset identifier')
+    parser.add_argument('--max-samples', type=int, default=None,
+                        help='Maximum number of samples to use (None for all)')
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='Batch size')
+    parser.add_argument('--epochs', type=int, default=10,
+                        help='Number of epochs')
+    parser.add_argument('--lr', type=float, default=0.001,
+                        help='Learning rate')
+    parser.add_argument('--hidden-channels', type=int, default=128,
+                        help='Number of hidden channels')
+    parser.add_argument('--num-residual-blocks', type=int, default=4,
+                        help='Number of residual blocks')
+    parser.add_argument('--output-dir', type=str, default='../models',
+                        help='Output directory for saved models')
+    parser.add_argument('--device', type=str, default='auto',
+                        help='Device to use (auto, cpu, cuda)')
+    parser.add_argument('--use-game-outcome', action='store_true',
+                        help='Use game outcome as label (else use simple evaluation)')
+    
+    args = parser.parse_args()
+    
+    train_main(
+        dataset=args.dataset,
+        max_samples=args.max_samples,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        lr=args.lr,
+        hidden_channels=args.hidden_channels,
+        num_residual_blocks=args.num_residual_blocks,
+        output_dir=args.output_dir,
+        device=args.device,
+        use_game_outcome=args.use_game_outcome
+    )
+
+
 if __name__ == '__main__':
-    main()
+    main_cli()
 
