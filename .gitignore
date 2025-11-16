@@ -4,3 +4,8 @@ venv
 .env.local
 .env
 devtools
+data/games-2.5s.pgn
+.vs/
+*.user
+*.suo
+.pgn
