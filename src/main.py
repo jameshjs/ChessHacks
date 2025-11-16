@@ -1,4 +1,6 @@
+from asyncio.constants import DEBUG_STACK_DEPTH
 from calendar import c
+from re import M
 from .utils import chess_manager, GameContext
 
 from chess import Move
@@ -9,9 +11,14 @@ import torch
 import torch.nn as nn
 import numpy as np
 from typing import Optional, Callable
+import time
+
  
 
+    
 
+
+nn_cache = {}
 
 def evaluate_board(board: chess.Board):
 
@@ -21,7 +28,7 @@ def evaluate_board(board: chess.Board):
         chess.BISHOP: 330.0, 
         chess.ROOK:500.0, 
         chess.QUEEN: 900.0,
-        chess.King: 0.0}
+        chess.KING: 0.0}
 
     PAWN_TABLE = [
     0,  0,  0,  0,  0,  0,  0,  0,
@@ -97,39 +104,63 @@ def evaluate_board(board: chess.Board):
         chess.QUEEN: QUEEN_TABLE,
         chess.KING: KING_TABLE}
 
-    eval=0
+    eval = 0
 
+    # ============================================================
+    # 1. MATERIAL + PST
+    # ============================================================
 
     for square in chess.SQUARES:
         piece = board.piece_at(square)
-        if(piece):
-            
-            if(piece.color==chess.WHITE):
-                eval+=piece_value[piece.piece_type]
-                eval+=position_table[piece.piece_type][square]
+        if not piece:
+            continue
+
+        value = piece_value[piece.piece_type]
+        pst   = position_table[piece.piece_type]
+
+        if piece.color == chess.WHITE:
+            eval += value
+            eval += pst[square]               # White uses normal index
+        else:
+            eval -= value
+            eval -= pst[chess.square_mirror(square)]  # Black uses mirrored index
+
+    # ============================================================
+    # 2. HANGING PIECES
+    # ============================================================
+
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if not piece:
+            continue
+
+        attackers = board.attackers(not piece.color, square)
+        defenders = board.attackers(piece.color, square)
+
+        if attackers and not defenders:
+            value = piece_value[piece.piece_type]
+            if piece.color == chess.WHITE:
+                eval -= value     # white loses a piece
             else:
-                eval-=piece_value[piece.piece_type]
-                eval+=position_table[piece.piece_type][square]
+                eval += value     # black loses a piece
 
+    # ============================================================
+    # 3. MOBILITY
+    # ============================================================
 
+    original_turn = board.turn
 
+    board.turn = chess.WHITE
+    white_mob = len(list(board.legal_moves))
+
+    board.turn = chess.BLACK
+    black_mob = len(list(board.legal_moves))
+
+    board.turn = original_turn
+
+    eval += 10 * (white_mob - black_mob)
 
     return eval
-            
-class minimax_searcher:
-
-    def __init__(self, evaluator: Callable[[chess.Board], float], max_depth: int = 3):
-        self.evaluator = evaluator
-        self.max_depth = max_depth
-        self.nodes_searched = 0         # Initialize counter
-    def search(self, board: chess.Board) :
-        self.nodes_searched=0
-
-
-
-
-
-
 
 
 
@@ -216,6 +247,8 @@ model_K.load_state_dict(torch.load(str(model_path), map_location=device))
 # Set to evaluation mode
 model_K.eval()
 def predict_legal_move(model, fen, device, top_k=5):
+    if fen in nn_cache:
+        return nn_cache[fen]
     board= chess.Board(fen)
     board_tensor=torch.FloatTensor(board_to_tensor(board))
     board_tensor = board_tensor.unsqueeze(0).to(device)  # shape=(1,13,8,8)
@@ -228,7 +261,114 @@ def predict_legal_move(model, fen, device, top_k=5):
         legal_moves.append((move, probs[idx].item()))
 
     legal_moves.sort(key=lambda x: x[1], reverse=True)
-    return legal_moves[:5]
+    result= legal_moves[:top_k]
+    nn_cache[fen] = result
+
+    return result
+
+class MinimaxSearcher:
+
+    def __init__(self, evaluator, max_depth=3):
+        self.evaluator = evaluator
+        self.max_depth = max_depth
+        self.nodes_searched = 0
+
+    def search(self, board):
+        self.nodes_searched = 0
+
+        maximizing_player = (board.turn == chess.WHITE)
+
+        if maximizing_player:
+            best_value = float('-inf')
+        else:
+            best_value = float('inf')
+
+        best_move = None
+
+        policy_moves = [m for (m, _) in predict_legal_move(model_K, board.fen(), device, top_k=10)]
+        tactical_moves = [m for m in board.legal_moves if board.is_capture(m) or board.gives_check(m)]
+
+        moves = policy_moves[:]  
+
+        for m in tactical_moves:
+            if m not in moves:
+                moves.append(m)
+
+
+
+        for move in moves:
+            board.push(move)
+            value = self._minimax(board,
+                                  depth=self.max_depth - 1,
+                                  alpha=float('-inf'),
+                                  beta=float('inf'),
+                                  maximizing=not maximizing_player)
+            board.pop()
+
+            if maximizing_player:
+                if value > best_value:
+                    best_value = value
+                    best_move = move
+            else:
+                if value < best_value:
+                    best_value = value
+                    best_move = move
+
+        return best_move
+
+
+    def _minimax(self, board, depth, alpha, beta, maximizing):
+        self.nodes_searched += 1
+       
+
+        if depth == 0 or board.is_game_over():
+            return self.evaluator(board)
+        if depth >= 2:
+               policy_moves = [m for (m, _) in predict_legal_move(model_K, board.fen(), device, top_k=10)]
+               tactical_moves = [m for m in board.legal_moves if board.is_capture(m) or board.gives_check(m)]
+               moves_searched = policy_moves[:]  
+
+               for m in tactical_moves:
+                    if m not in moves_searched:
+                        moves_searched.append(m)
+
+
+
+        else:
+            moves_searched= list(board.legal_moves)
+
+        if maximizing:
+            max_eval = float('-inf')
+
+            for move in moves_searched:
+                board.push(move)
+                value = self._minimax(board, depth - 1, alpha, beta, False)
+                board.pop()
+
+                max_eval = max(max_eval, value)
+                alpha = max(alpha, value)
+                if beta <= alpha:
+                    break
+            return max_eval
+        else:
+            min_eval = float('inf')
+            for move in moves_searched:
+                board.push(move)
+                value = self._minimax(board, depth - 1, alpha, beta, True)
+                board.pop()
+
+                min_eval = min(min_eval, value)
+                beta = min(beta, value)
+                if beta <= alpha:
+                    break
+            return min_eval
+
+
+
+
+searcher = MinimaxSearcher(evaluator=evaluate_board, max_depth=3)
+
+    
 
 
 
@@ -237,42 +377,39 @@ def test_func(ctx: GameContext):
     """
     Main entrypoint for making moves.
     """
-    print("Making move prediction...")
+    print("Thinking with Minimax...")
+
+    board = ctx.board
     
     try:
-        # Get top 5 legal moves with probabilities
-        top_moves = predict_legal_move(model_K, ctx.board.fen(), device, top_k=5)
-        
-        if not top_moves:
-            raise ValueError("No legal moves available")
-        
-        # Convert to dict for logProbabilities
-        move_probs = {move: prob for move, prob in top_moves}
-        
-        # Log probabilities for UI
-        ctx.logProbabilities(move_probs)
-        
-        # Return best move (just the Move object, not the tuple)
-        best_move = top_moves[0][0]  # ← FIXED: Extract move from tuple
-        print(f"Selected move: {best_move.uci()} (confidence: {top_moves[0][1]:.4f})")
+        # Run minimax to get best move
+
+        start = time.time()
+        best_move = searcher.search(board)
+        end = time.time()
+
+        print(f"Move time: {end - start:.3f} seconds")
+
+        if best_move is None:
+            raise ValueError("Minimax returned no move")
+
         
         return best_move
 
-
     except Exception as e:
-        print(f"Error in prediction: {e}")
+        print(f"[ERROR] Minimax crashed: {e}")
         import traceback
         traceback.print_exc()
-        
-        # Fallback to random move
-        import random
-        legal_moves = list(ctx.board.generate_legal_moves())
+
+        # Fallback: random move
+        legal_moves = list(board.legal_moves)
         if not legal_moves:
             ctx.logProbabilities({})
-            raise ValueError("No legal moves available")
-        
+            raise ValueError("No legal moves")
+
         move = random.choice(legal_moves)
-        ctx.logProbabilities({m: 1.0/len(legal_moves) for m in legal_moves})
+        ctx.logProbabilities({m: 1.0 / len(legal_moves) for m in legal_moves})
+        print(f"Fallback random move: {move.uci()}")
         return move
 
 @chess_manager.reset
@@ -280,7 +417,5 @@ def reset_func(ctx: GameContext):
     """
     Reset function called when a new game begins.
     """
-    global _searcher
-    if _searcher:
-        _searcher.nodes_searched = 0
-    print("New game started, resetting search state")
+    nn_cache.clear()
+
