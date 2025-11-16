@@ -125,18 +125,18 @@ def evaluate_board(board: chess.Board):
             eval -= value
             eval -= pst[chess.square_mirror(square)]  # Black uses mirrored index
 
-    # ============================================================
-    # 2. HANGING PIECES
-    # ============================================================
+     # ============================================================
+  # 2. HANGING PIECES
+  # ============================================================
 
     for square in chess.SQUARES:
         piece = board.piece_at(square)
         if not piece:
             continue
-
+ 
         attackers = board.attackers(not piece.color, square)
         defenders = board.attackers(piece.color, square)
-
+ 
         if attackers and not defenders:
             value = piece_value[piece.piece_type]
             if piece.color == chess.WHITE:
@@ -285,7 +285,7 @@ class MinimaxSearcher:
 
         best_move = None
 
-        policy_moves = [m for (m, _) in predict_legal_move(model_K, board.fen(), device, top_k=10)]
+        policy_moves = [m for (m, _) in predict_legal_move(model_K, board.fen(), device, top_k=15)]
         tactical_moves = [m for m in board.legal_moves if board.is_capture(m) or board.gives_check(m)]
 
         moves = policy_moves[:]  
