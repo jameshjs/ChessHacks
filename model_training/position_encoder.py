@@ -4,7 +4,7 @@ Converts chess.Board objects to neural network input tensors.
 """
 
 import numpy as np
-import chess
+import chesss
 from typing import Union
 
 
