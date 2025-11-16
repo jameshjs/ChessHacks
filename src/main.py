@@ -366,7 +366,7 @@ class MinimaxSearcher:
 
 
 
-searcher = MinimaxSearcher(evaluator=evaluate_board, max_depth=3)
+searcher = MinimaxSearcher(evaluator=evaluate_board, max_depth=4)
 
     
 
