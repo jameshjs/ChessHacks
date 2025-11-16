@@ -1,19 +1,8 @@
-"""
-Training script for chess position evaluation model.
-"""
-
-"""
-Neural network model for chess position evaluation.
-"""
-
-"""
-Dataset loader for Leela Chess Zero Self-Play Games Dataset from Kaggle.
-"""
-
-"""
-Position encoder for chess boards.
-Converts chess.Board objects to neural network input tensors.
-"""
+# Training script for chess position evaluation model.
+# Neural network model for chess position evaluation.
+# Dataset loader for Leela Chess Zero Self-Play Games Dataset from Kaggle.
+#Position encoder for chess boards.
+#Converts chess.Board objects to neural network input tensors.
 
 import numpy as np
 import chess
@@ -571,48 +560,67 @@ import torch.nn.functional as F
 
 class ChessEvaluatorModel(nn.Module):
     """
-    CNN-based model for evaluating chess positions.
+    Improved CNN-based model for evaluating chess positions.
     
     Architecture:
     - Input: (batch_size, 8, 8, 19) or (batch_size, 19, 8, 8)
-    - Convolutional layers with residual connections
-    - Fully connected layers
+    - Initial convolution with batch norm
+    - Multiple improved residual blocks with SE attention
+    - Global average pooling for better feature aggregation
+    - Fully connected layers with residual connections
     - Output: Single scalar (evaluation in centipawns)
     """
     
-    def __init__(self, input_channels=19, hidden_channels=128, num_residual_blocks=4):
+    def __init__(self, input_channels=19, hidden_channels=128, num_residual_blocks=6, use_se=True):
         """
         Args:
             input_channels: Number of input channels (default 19)
             hidden_channels: Number of hidden channels in conv layers
             num_residual_blocks: Number of residual blocks
+            use_se: Whether to use squeeze-and-excitation blocks
         """
         super(ChessEvaluatorModel, self).__init__()
         
         self.input_channels = input_channels
         self.hidden_channels = hidden_channels
+        self.use_se = use_se
         
-        # Initial convolution
-        self.conv1 = nn.Conv2d(input_channels, hidden_channels, kernel_size=3, padding=1)
+        # Initial convolution with wider kernel for better initial feature extraction
+        self.conv1 = nn.Conv2d(input_channels, hidden_channels, kernel_size=3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(hidden_channels)
         
-        # Residual blocks
-        self.residual_blocks = nn.ModuleList([
-            ResidualBlock(hidden_channels) for _ in range(num_residual_blocks)
-        ])
+        # Use improved residual blocks with SE attention
+        if use_se:
+            self.residual_blocks = nn.ModuleList([
+                ImprovedResidualBlock(hidden_channels, use_se=True) for _ in range(num_residual_blocks)
+            ])
+        else:
+            self.residual_blocks = nn.ModuleList([
+                ResidualBlock(hidden_channels) for _ in range(num_residual_blocks)
+            ])
         
-        # Final convolution
-        self.conv_final = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1)
+        # Additional convolution layer for feature refinement
+        self.conv_final = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, bias=False)
         self.bn_final = nn.BatchNorm2d(hidden_channels)
         
-        # Fully connected layers
-        self.fc1 = nn.Linear(hidden_channels * 8 * 8, 256)
-        self.fc2 = nn.Linear(256, 128)
-        self.fc3 = nn.Linear(128, 64)
-        self.fc_out = nn.Linear(64, 1)
+        # Global average pooling for better spatial feature aggregation
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
         
-        # Dropout for regularization
-        self.dropout = nn.Dropout(0.3)
+        # Fully connected layers with residual-like connections
+        self.fc1 =nn.Linear(hidden_channels, 512)
+        self.fc2 = nn.Linear(512, 256)
+        self.fc3 = nn.Linear(256, 128)
+        self.fc_out = nn.Linear(128, 1)
+        
+        # Batch normalization for FC layers
+        self.bn_fc1 = nn.BatchNorm1d(512)
+        self.bn_fc2 = nn.BatchNorm1d(256)
+        self.bn_fc3 = nn.BatchNorm1d(128)
+        
+        # Dropout for regularization (lower dropout for better capacity)
+        self.dropout1 = nn.Dropout(0.4)
+        self.dropout2 = nn.Dropout(0.3)
+        self.dropout3 = nn.Dropout(0.2)
         
     def forward(self, x):
         """
@@ -622,32 +630,35 @@ class ChessEvaluatorModel(nn.Module):
             x: Input tensor of shape (batch_size, 19, 8, 8) or (batch_size, 8, 8, 19)
             
         Returns:
-            Evaluation scores of shape (batch_size, 1)
+            Evaluation scores of shape (batch_size,)
         """
         # Handle channel-last format (batch_size, 8, 8, 19) -> (batch_size, 19, 8, 8)
         if x.dim() == 4 and x.shape[-1] == self.input_channels:
             x = x.permute(0, 3, 1, 2)
         
-        # Initial convolution
-        x = F.relu(self.bn1(self.conv1(x)))
+        # Initial convolution with GELU activation
+        x = F.gelu(self.bn1(self.conv1(x)))
         
         # Residual blocks
         for block in self.residual_blocks:
             x = block(x)
         
         # Final convolution
-        x = F.relu(self.bn_final(self.conv_final(x)))
+        x = F.gelu(self.bn_final(self.conv_final(x)))
         
-        # Flatten
-        x = x.view(x.size(0), -1)
+        # Global average pooling for better feature aggregation
+        x = self.global_pool(x)
+        x = x.view(x.size(0), -1)  # Flatten: (batch, hidden_channels)
         
-        # Fully connected layers
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = F.relu(self.fc2(x))
-        x = self.dropout(x)
-        x = F.relu(self.fc3(x))
-        x = self.dropout(x)
+        # Fully connected layers with batch norm and dropout
+        x = F.gelu(self.bn_fc1(self.fc1(x)))
+        x = self.dropout1(x)
+        
+        x = F.gelu(self.bn_fc2(self.fc2(x)))
+        x = self.dropout2(x)
+        
+        x = F.gelu(self.bn_fc3(self.fc3(x)))
+        x = self.dropout3(x)
         
         # Output (evaluation in centipawns)
         x = self.fc_out(x)
@@ -655,34 +666,74 @@ class ChessEvaluatorModel(nn.Module):
         return x.squeeze(-1)  # Remove last dimension if batch_size > 1
 
 
+class SqueezeExcitation(nn.Module):
+    """Squeeze-and-Excitation block for channel attention."""
+    
+    def __init__(self, channels, reduction=16):
+        super(SqueezeExcitation, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Linear(channels, channels // reduction)
+        self.fc2 = nn.Linear(channels // reduction, channels)
+    
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = F.relu(self.fc1(y))
+        y = torch.sigmoid(self.fc2(y)).view(b, c, 1, 1)
+        return x * y
+
+
+class ImprovedResidualBlock(nn.Module):
+    """Improved residual block with squeeze-and-excitation and better structure."""
+    
+    def __init__(self, channels, use_se=True):
+        super(ImprovedResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.se = SqueezeExcitation(channels) if use_se else nn.Identity()
+        
+    def forward(self, x):
+        residual = x
+        # Use GELU for better gradient flow
+        x = F.gelu(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
+        x = self.se(x)  # Apply channel attention
+        x = x + residual  # Residual connection
+        x = F.gelu(x)
+        return x
+
+
 class ResidualBlock(nn.Module):
-    """Residual block with two convolutions."""
+    """Residual block with two convolutions (kept for backward compatibility)."""
     
     def __init__(self, channels):
         super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(channels)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
     
     def forward(self, x):
         residual = x
-        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.gelu(self.bn1(self.conv1(x)))  # Use GELU instead of ReLU
         x = self.bn2(self.conv2(x))
         x = x + residual  # Residual connection
-        x = F.relu(x)
+        x = F.gelu(x)
         return x
 
 
-def create_model(input_channels=19, hidden_channels=128, num_residual_blocks=4, device='cpu'):
+def create_model(input_channels=19, hidden_channels=128, num_residual_blocks=6, device='cpu', use_se=True):
     """
-    Create and initialize a chess evaluator model.
+    Create and initialize an improved chess evaluator model.
     
     Args:
         input_channels: Number of input channels
         hidden_channels: Number of hidden channels
         num_residual_blocks: Number of residual blocks
         device: Device to place model on
+        use_se: Whether to use squeeze-and-excitation blocks
         
     Returns:
         Initialized model
@@ -690,20 +741,26 @@ def create_model(input_channels=19, hidden_channels=128, num_residual_blocks=4, 
     model = ChessEvaluatorModel(
         input_channels=input_channels,
         hidden_channels=hidden_channels,
-        num_residual_blocks=num_residual_blocks
+        num_residual_blocks=num_residual_blocks,
+        use_se=use_se
     )
     model = model.to(device)
     
-    # Initialize weights
+    # Improved weight initialization
     for m in model.modules():
         if isinstance(m, nn.Conv2d):
+            # Use He initialization for GELU
             nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-        elif isinstance(m, nn.BatchNorm2d):
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
             nn.init.constant_(m.weight, 1)
             nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.Linear):
-            nn.init.normal_(m.weight, 0, 0.01)
-            nn.init.constant_(m.bias, 0)
+            # Xavier initialization for linear layers
+            nn.init.xavier_normal_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
     
     return model
 
@@ -728,19 +785,8 @@ app = modal.App("chess-model-training")
 # Create a shared volume for model outputs
 volume = modal.Volume.from_name("chess-models", create_if_missing=True)
 
-# Get the directory containing this file
-_model_training_dir = Path(__file__).parent
-
-# Read the local Python files to include in the image
-def _read_file_content(filepath):
-    """Read file content for embedding in image."""
-    try:
-        with open(filepath):
-            return f.read()
-    except:
-        return None
-
-# Define the image with all dependencies and embedded files
+# Define the image with all dependencies
+# All model code is in this file, so we don't need to copy separate files
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .pip_install([
@@ -752,16 +798,12 @@ image = (
         "tqdm>=4.65.0",
         "python-chess>=1.999",
     ])
-    .run_commands([
-        "mkdir -p /root/model_training",
-    ])
     .env({"KAGGLE_USERNAME": os.getenv("KAGGLE_USERNAME", "")})
     .env({"KAGGLE_KEY": os.getenv("KAGGLE_KEY", "")})
-    .workdir("/root/model_training")
 )
 
-def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
-    """Train for one epoch."""
+def train_epoch(model, dataloader, criterion, optimizer, device, epoch, max_grad_norm=1.0):
+    """Train for one epoch with gradient clipping."""
     model.train()
     total_loss = 0.0
     num_batches = 0
@@ -778,6 +820,11 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
         
         # Backward pass
         loss.backward()
+        
+        # Gradient clipping for stability
+        if max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        
         optimizer.step()
         
         total_loss += loss.item()
@@ -813,11 +860,15 @@ def train_main(
     batch_size: int = 64,
     epochs: int = 10,
     lr: float = 0.001,
-    hidden_channels: int = 128,
-    num_residual_blocks: int = 4,
+    hidden_channels: int = 192,  # Increased default capacity
+    num_residual_blocks: int = 6,  # More blocks for better depth
     output_dir: str = '../models',
     device: str = 'auto',
-    use_game_outcome: bool = False
+    use_game_outcome: bool = False,
+    use_se: bool = True,  # Use squeeze-and-excitation by default
+    use_huber_loss: bool = True,  # Use Huber loss for better robustness
+    weight_decay: float = 1e-4,  # L2 regularization
+    max_grad_norm: float = 1.0  # Gradient clipping
 ):
     """Main training function that can be called directly or via Modal."""
     # Import here to handle Modal's execution environment
@@ -831,6 +882,12 @@ def train_main(
     # Convert boolean string to bool
     if isinstance(use_game_outcome, str):
         use_game_outcome = use_game_outcome.lower() in ('true', '1', 'yes')
+    
+    # Convert boolean strings to bool
+    if isinstance(use_se, str):
+        use_se = use_se.lower() in ('true', '1', 'yes')
+    if isinstance(use_huber_loss, str):
+        use_huber_loss = use_huber_loss.lower() in ('true', '1', 'yes')
     
     # Create args-like object for compatibility
     class Args:
@@ -846,6 +903,10 @@ def train_main(
     args.output_dir = output_dir
     args.device = device
     args.use_game_outcome = use_game_outcome
+    args.use_se = use_se
+    args.use_huber_loss = use_huber_loss
+    args.weight_decay = weight_decay
+    args.max_grad_norm = max_grad_norm
     
     # Determine device
     if args.device == 'auto':
@@ -903,18 +964,36 @@ def train_main(
         input_channels=19,
         hidden_channels=args.hidden_channels,
         num_residual_blocks=args.num_residual_blocks,
-        device=device
+        device=device,
+        use_se=args.use_se
     )
     
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model has {num_params:,} parameters")
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model has {num_params:,} total parameters ({trainable_params:,} trainable)")
     
-    # Loss and optimizer
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    # Loss function: Use Huber loss for better robustness to outliers
+    if args.use_huber_loss:
+        criterion = nn.HuberLoss(delta=100.0)  # Delta=100 centipawns threshold
+        print("Using Huber loss (more robust to outliers)")
+    else:
+        criterion = nn.MSELoss()
+        print("Using MSE loss")
+    
+    # Optimizer with weight decay (L2 regularization)
+    optimizer = optim.AdamW(
+        model.parameters(), 
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
+    
+    # Improved learning rate scheduler
+    # Note: verbose parameter was removed in newer PyTorch versions
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3
+        optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6
     )
     
     # Training loop
@@ -925,8 +1004,11 @@ def train_main(
         print(f"Epoch {epoch}/{args.epochs}")
         print(f"{'='*50}")
         
-        # Train
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, device, epoch)
+        # Train with gradient clipping
+        train_loss = train_epoch(
+            model, train_loader, criterion, optimizer, device, epoch, 
+            max_grad_norm=args.max_grad_norm
+        )
         print(f"Train Loss: {train_loss:.4f}")
         
         # Validate
@@ -949,10 +1031,12 @@ def train_main(
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
+                'train_loss': train_loss,
                 'model_config': {
                     'input_channels': 19,
                     'hidden_channels': args.hidden_channels,
                     'num_residual_blocks': args.num_residual_blocks,
+                    'use_se': args.use_se,
                 }
             }, model_path)
             print(f"Saved best model to {model_path}")
@@ -964,10 +1048,12 @@ def train_main(
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss': val_loss,
+            'train_loss': train_loss,
             'model_config': {
                 'input_channels': 19,
                 'hidden_channels': args.hidden_channels,
                 'num_residual_blocks': args.num_residual_blocks,
+                'use_se': args.use_se,
             }
         }, checkpoint_path)
     
@@ -978,10 +1064,12 @@ def train_main(
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'val_loss': val_loss,
+        'train_loss': train_loss,
         'model_config': {
             'input_channels': 19,
             'hidden_channels': args.hidden_channels,
             'num_residual_blocks': args.num_residual_blocks,
+            'use_se': args.use_se,
         }
     }, final_model_path)
     print(f"\nSaved final model to {final_model_path}")
@@ -1000,24 +1088,22 @@ def train_cloud(
     batch_size: int = 64,
     epochs: int = 10,
     lr: float = 0.001,
-    hidden_channels: int = 128,
-    num_residual_blocks: int = 4,
+    hidden_channels: int = 192,
+    num_residual_blocks: int = 6,
     output_dir: str = '/models',
     device: str = 'cuda',
-    use_game_outcome: bool = False
+    use_game_outcome: bool = False,
+    use_se: bool = True,
+    use_huber_loss: bool = True,
+    weight_decay: float = 1e-4,
+    max_grad_norm: float = 1.0
 ):
     """
     Modal cloud function for training on GPU.
     This runs on Modal's cloud infrastructure with GPU support.
+    All model classes (ChessEvaluatorModel, ChessPositionDataset, etc.) are defined
+    in this file, so no additional imports are needed.
     """
-    import sys
-    
-    # Write the embedded Python files to disk in the container
-    # This makes them available for import
-    
-    # Add to Python path
-    sys.path.insert(0, '/root/model_training')
-    
     # Ensure output directory exists
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
@@ -1032,7 +1118,11 @@ def train_cloud(
         num_residual_blocks=num_residual_blocks,
         output_dir=output_dir,
         device=device,  # Force CUDA on Modal
-        use_game_outcome=use_game_outcome
+        use_game_outcome=use_game_outcome,
+        use_se=use_se,
+        use_huber_loss=use_huber_loss,
+        weight_decay=weight_decay,
+        max_grad_norm=max_grad_norm
     )
     
     # Commit volume to persist models (volume is mounted at /models)
@@ -1046,11 +1136,15 @@ def main(
     batch_size: int = 64,
     epochs: int = 10,
     lr: float = 0.001,
-    hidden_channels: int = 128,
-    num_residual_blocks: int = 4,
+    hidden_channels: int = 192,
+    num_residual_blocks: int = 6,
     output_dir: str = '/models',
     device: str = 'cuda',
     use_game_outcome: bool = False,
+    use_se: bool = True,
+    use_huber_loss: bool = True,
+    weight_decay: float = 1e-4,
+    max_grad_norm: float = 1.0,
     local: bool = False
 ):
     """
@@ -1069,7 +1163,11 @@ def main(
             num_residual_blocks=num_residual_blocks,
             output_dir='../models',  # Local path
             device='auto',
-            use_game_outcome=use_game_outcome
+            use_game_outcome=use_game_outcome,
+            use_se=use_se,
+            use_huber_loss=use_huber_loss,
+            weight_decay=weight_decay,
+            max_grad_norm=max_grad_norm
         )
     else:
         # Run on Modal cloud with GPU
@@ -1084,7 +1182,11 @@ def main(
             num_residual_blocks=num_residual_blocks,
             output_dir=output_dir,
             device=device,
-            use_game_outcome=use_game_outcome
+            use_game_outcome=use_game_outcome,
+            use_se=use_se,
+            use_huber_loss=use_huber_loss,
+            weight_decay=weight_decay,
+            max_grad_norm=max_grad_norm
         )
 
 
@@ -1103,7 +1205,7 @@ def main_cli():
                         help='Learning rate')
     parser.add_argument('--hidden-channels', type=int, default=128,
                         help='Number of hidden channels')
-    parser.add_argument('--num-residual-blocks', type=int, default=4,
+    parser.add_argument('--num-residual-blocks', type=int, default=6,
                         help='Number of residual blocks')
     parser.add_argument('--output-dir', type=str, default='../models',
                         help='Output directory for saved models')
@@ -1111,6 +1213,18 @@ def main_cli():
                         help='Device to use (auto, cpu, cuda)')
     parser.add_argument('--use-game-outcome', action='store_true',
                         help='Use game outcome as label (else use simple evaluation)')
+    parser.add_argument('--use-se', action='store_true', default=True,
+                        help='Use squeeze-and-excitation blocks')
+    parser.add_argument('--no-se', dest='use_se', action='store_false',
+                        help='Disable squeeze-and-excitation blocks')
+    parser.add_argument('--use-huber-loss', action='store_true', default=True,
+                        help='Use Huber loss instead of MSE')
+    parser.add_argument('--use-mse-loss', dest='use_huber_loss', action='store_false',
+                        help='Use MSE loss instead of Huber')
+    parser.add_argument('--weight-decay', type=float, default=1e-4,
+                        help='Weight decay (L2 regularization)')
+    parser.add_argument('--max-grad-norm', type=float, default=1.0,
+                        help='Maximum gradient norm for clipping')
     
     args = parser.parse_args()
     
@@ -1124,7 +1238,11 @@ def main_cli():
         num_residual_blocks=args.num_residual_blocks,
         output_dir=args.output_dir,
         device=args.device,
-        use_game_outcome=args.use_game_outcome
+        use_game_outcome=args.use_game_outcome,
+        use_se=args.use_se,
+        use_huber_loss=args.use_huber_loss,
+        weight_decay=args.weight_decay,
+        max_grad_norm=args.max_grad_norm
     )
 
 

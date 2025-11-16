@@ -6,7 +6,7 @@ from pathlib import Path
 
 # Model configuration
 # Get model path from environment or use default
-_default_path = Path(__file__).parent.parent / 'models' / 'chess_evaluator_quick.pth'
+_default_path = Path(__file__).parent.parent / 'models' / 'chess_evaluator_final.pth'
 MODEL_PATH = os.getenv('MODEL_PATH', str(_default_path))
 MODEL_PATH = Path(MODEL_PATH)
 if not MODEL_PATH.is_absolute():
@@ -29,9 +29,9 @@ def initialize_model():
         _ml_evaluator = MLEvaluator(str(MODEL_PATH))
         _searcher = MinimaxSearcher(
             evaluator=_ml_evaluator.evaluate,
-            max_depth=3,  # Adjust based on time constraints
+            max_depth=5,  # Increased depth for better play
             enable_quiescence=True,
-            quiescence_depth=2
+            quiescence_depth=4  # Increased quiescence depth
         )
         print("Model loaded successfully!")
         return _ml_evaluator, _searcher
